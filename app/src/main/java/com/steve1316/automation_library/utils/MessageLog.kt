@@ -73,7 +73,8 @@ class MessageLog {
 				return
 			}
 			
-			cleanLogsFolder(context)
+            // Set max to 49 so that when we add our new file, the total becomes 50.
+			cleanLogsFolder(context, maxAmount = 49)
 
 			Log.d(TAG, "Now beginning process to save current Message Log to internal storage...")
 
@@ -158,10 +159,12 @@ class MessageLog {
 			// Delete the oldest logs if the amount inside is greater than the given max amount.
 			val files = directory.listFiles()
 			if (files != null) {
-				Arrays.sort(files, Comparator.comparingLong(File::lastModified).reversed())
+				Arrays.sort(files, Comparator.comparingLong(File::lastModified))
 				val diff = files.size - maxAmount
 				if (diff > 0) {
-					for (i in 0..diff) {
+                    Log.w(TAG, "Log file limit reached. Deleting [$diff] oldest log files:")
+					for (i in 0 until diff) {
+                        Log.w(TAG, "\t${files[i]}")
 						files[i].delete()
 					}
 				}
