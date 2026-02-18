@@ -780,8 +780,15 @@ open class ImageUtils(protected val context: Context) {
 		return bitmap ?: throw IllegalStateException("Failed to acquire a source bitmap even after caching and retries.")
 	}
 
-    open fun getRegionBitmap(x: Int, y: Int, w: Int, h: Int): Bitmap? {
-        return MediaProjectionService.captureArea(x, y, w, h, saveImage = debugMode)
+    open fun getRegionBitmap(x: Int, y: Int, w: Int, h: Int): Bitmap {
+        var bitmap = MediaProjectionService.captureArea(x, y, w, h, saveImage = debugMode)
+
+        if (bitmap == null) {
+			Log.w(tag, "Region bitmap is null on initial capture. Waiting a moment before trying again.")
+			bitmap = MediaProjectionService.captureArea(x, y, w, h, saveImage = debugMode)
+		}
+
+		return bitmap ?: throw IllegalStateException("Failed to acquire a region bitmap even after caching and retries.")
     }
 
 	/**

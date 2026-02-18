@@ -177,6 +177,15 @@ class MediaProjectionService : Service() {
 
         /** Takes screenshot of the specified region.
          *
+         * This is a very similar process to [takeScreenshotNow] except it
+         * crops the image buffer prior to generating the bitmap. This is as
+         * opposed to calling [takeScreenshotNow] then cropping the result
+         * afterward. This process is faster since converting larger buffers
+         * to a bitmap is a slow process, so reducing the buffer size prior to
+         * that conversion speeds up the total time it takes. On top of that,
+         * cropping afterward requires us to call Bitmap.createBitmap a
+         * second time which adds more computation time.
+         *
          * @param cropX The start X-coorindate of the crop.
          * @param cropY The start Y-coordinate of the crop.
          * @param cropW The width to crop.
@@ -198,45 +207,86 @@ class MediaProjectionService : Service() {
             val cropH: Int = cropH.coerceIn(1, SharedData.displayHeight)
             val cropX: Int = cropX.coerceIn(0, SharedData.displayWidth - cropW)
             val cropY: Int = cropY.coerceIn(0, SharedData.displayHeight - cropH)
-            var sourceBitmap: Bitmap? = null
-			val image: Image = imageReader.acquireLatestImage() ?: return null
 
-            try {
-                val plane = image.planes[0]
-                val buffer = plane.buffer
-                val pixelStride = plane.pixelStride
-                val rowStride = plane.rowStride
-                val sourceBitmap = Bitmap.createBitmap(cropW, cropH, Bitmap.Config.ARGB_8888)
+            var image: Image? = imageReader.acquireLatestImage()
 
-                for (y in 0 until cropH) {
-                    val sourceOffset = ((cropY + y) * rowStride) + (cropX * pixelStride)
-                    buffer.position(sourceOffset)
-                    val rowPixels = IntArray(cropW)
-                    buffer.asIntBuffer().get(rowPixels)
-                    sourceBitmap.setPixels(rowPixels, 0, cropW, 0, y, cropW, 1)
+            // If no image is available, retry for up to 50ms. This handles cases
+            // where the screen is static or the ScreenRecorder has just consumed
+            // the latest frame.
+            if (image == null) {
+                var retries = 5
+                while (retries > 0) {
+                    Thread.sleep(10)
+                    image = imageReader.acquireLatestImage()
+                    if (image != null) break
+                    retries--
                 }
-
-                // Now write the Bitmap to the specified file inside the /files/temp/ folder. This adds about 500-600ms to runtime every time this is called when Debug Mode is on.
-                if (saveImage) {
-                    val fos = if (isException) {
-                        FileOutputStream("$tempDirectory/captureArea_exception.png")
-                    } else {
-                        FileOutputStream("$tempDirectory/captureArea_source.png")
-                    }
-                    sourceBitmap.compress(Bitmap.CompressFormat.PNG, 100, fos)
-
-                    // Perform cleanup by closing streams and freeing up memory.
-                    try {
-                        fos.close()
-                    } catch (ioe: IOException) {
-                        ioe.printStackTrace()
-                    }
-                }
-
-                return sourceBitmap
-            } finally {
-                image.close()
             }
+
+            var useCachedBitmap: Boolean = false
+
+            var newBitmap: Bitmap? = null
+            val prevBitmap: Bitmap? = lastBitmap
+
+            if (image != null) {
+                try {
+                    val plane = image.planes[0]
+                    val buffer = plane.buffer
+                    val pixelStride = plane.pixelStride
+                    val rowStride = plane.rowStride
+                    newBitmap = Bitmap.createBitmap(cropW, cropH, Bitmap.Config.ARGB_8888)
+
+                    for (y in 0 until cropH) {
+                        val sourceOffset = ((cropY + y) * rowStride) + (cropX * pixelStride)
+                        buffer.position(sourceOffset)
+                        val rowPixels = IntArray(cropW)
+                        buffer.asIntBuffer().get(rowPixels)
+                        newBitmap.setPixels(rowPixels, 0, cropW, 0, y, cropW, 1)
+                    }
+
+                    // We don't update the cache with the cropped bitmap since we only
+                    // want to allow full screenshots in the cache, not cropped ones.
+                    useCachedBitmap = newBitmap == null
+                } finally {
+                    image.close()
+                }
+            } else {
+                if (prevBitmap != null) {
+                    Log.d(tag, "ImageReader returned null. Using cached bitmap.")
+                } else {
+                    Log.w(tag, "ImageReader returned null and no cached bitmap is available.")
+                }
+            }
+
+            // Save the Bitmap (either fresh or cached) if requested.
+            val bitmapToReturn = if (useCachedBitmap) {
+                if (prevBitmap == null) {
+                    null
+                } else {
+                    // Crop the cached bitmap if it exists.
+                    Bitmap.createBitmap(prevBitmap, cropX, cropY, cropW, cropH)
+                }
+            } else {
+                newBitmap
+            }
+            if (saveImage && bitmapToReturn != null) {
+                // Only save if it's an exception or if it's a fresh normal bitmap (to avoid redundant disk I/O on identical cached frames).
+                // We allow re-saving if it's an exception even if it's from cache, but we mark it.
+                val fos = if (isException) {
+                    FileOutputStream("$tempDirectory/exception.png")
+                } else {
+                    FileOutputStream("$tempDirectory/source.png")
+                }
+
+                try {
+                    bitmapToReturn.compress(Bitmap.CompressFormat.PNG, 100, fos)
+                    fos.close()
+                } catch (e: IOException) {
+                    Log.e(tag, "Failed to save screenshot: ${e.message}")
+                }
+            }
+
+            return bitmapToReturn
         }
 
 		/**
